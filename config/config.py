@@ -1,20 +1,16 @@
-#
-# Copyright (C) 2021-2022 by TeamYukki@Github, < https://github.com/TeamYukki >.
-#
-# This file is part of < https://github.com/TeamYukki/YukkiMusicBot > project,
-# and is released under the "GNU v3.0 License Agreement".
-# Please see < https://github.com/TeamYukki/YukkiMusicBot/blob/master/LICENSE >
-#
-# All rights reserved.
-
 import re
 import sys
+import os
+import time
 from os import getenv
-
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from pyrogram import filters
-
-load_dotenv()
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from PIL import Image, ImageDraw, ImageFont
+import json
+import asyncio
 
 # Get it from my.telegram.org
 API_ID = int(getenv("API_ID", ""))
@@ -23,12 +19,9 @@ API_HASH = getenv("API_HASH")
 ## Get it from @Botfather in Telegram.
 BOT_TOKEN = getenv("BOT_TOKEN")
 
-# Database to save your chats and stats... Get MongoDB:-  https://telegra.ph/How-To-get-Mongodb-URI-04-06
-MONGO_DB_URI = getenv("MONGO_DB_URI", None)
-
 # Custom max audio(music) duration for voice chat. set DURATION_LIMIT in variables with your own time(mins), Default to 60 mins.
 DURATION_LIMIT_MIN = int(
-    getenv("DURATION_LIMIT", "60")
+    getenv("DURATION_LIMIT", "300") #Updated DURATION_LIMIT to 300 minutes
 )  # Remember to give value in Minutes
 
 # Duration Limit for downloading Songs in MP3 or MP4 format from bot
@@ -165,7 +158,6 @@ userstats = {}
 clean = {}
 
 autoclean = []
-
 
 # Images
 START_IMG_URL = getenv("START_IMG_URL", None)
@@ -356,3 +348,133 @@ if not MUSIC_BOT_NAME.isascii():
         "[ERROR] - You've defined MUSIC_BOT_NAME wrong. Please don't use any special characters or Special font for this... Keep it simple and small."
     )
     sys.exit()
+
+
+# Constants for file storage
+STORAGE_DIR = "bot_storage"
+DATA_FILE = "storage_data.json"
+MAX_AGE_DAYS = 360
+CLEANUP_INTERVAL = 300  # 5 minutes in seconds
+DURATION_LIMIT_NEW = 300  # 300 minutes
+
+
+# Create storage directory if it doesn't exist
+os.makedirs(STORAGE_DIR, exist_ok=True)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Welcome! Send me any text and I'll convert it into a stylish image."
+    )
+
+async def create_stylish_text(text: str, filename: str):
+    # Create image
+    img = Image.new('RGB', (800, 400), color='black')
+    draw = ImageDraw.Draw(img)
+
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 60)
+    except:
+        font = ImageFont.load_default()
+
+    # Center the text
+    text_bbox = draw.textbbox((0, 0), text, font=font)
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+
+    x = (800 - text_width) / 2
+    y = (400 - text_height) / 2
+
+    # Add text with a gradient effect
+    for offset in range(3):
+        draw.text((x - offset, y - offset), text, font=font, fill=(255, 165, 0))
+    draw.text((x, y), text, font=font, fill=(255, 255, 255))
+
+    # Save the image
+    img.save(filename)
+
+def save_file_metadata(filename: str):
+    data_path = os.path.join(STORAGE_DIR, DATA_FILE)
+    try:
+        with open(data_path, 'r') as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
+
+    data[filename] = {
+        'created_at': datetime.now().isoformat(),
+        'last_accessed': datetime.now().isoformat()
+    }
+
+    with open(data_path, 'w') as f:
+        json.dump(data, f)
+
+async def cleanup_old_files():
+    while True:
+        data_path = os.path.join(STORAGE_DIR, DATA_FILE)
+        try:
+            with open(data_path, 'r') as f:
+                data = json.load(f)
+
+            now = datetime.now()
+            files_to_delete = []
+
+            for filename, metadata in data.items():
+                created_at = datetime.fromisoformat(metadata['created_at'])
+                if (now - created_at) > timedelta(days=MAX_AGE_DAYS):
+                    file_path = os.path.join(STORAGE_DIR, filename)
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                    files_to_delete.append(filename)
+
+            # Update metadata file
+            for filename in files_to_delete:
+                del data[filename]
+
+            with open(data_path, 'w') as f:
+                json.dump(data, f)
+
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+
+        await asyncio.sleep(CLEANUP_INTERVAL)
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        await update.message.reply_text("Please send me some text!")
+        return
+
+    # Generate unique filename
+    timestamp = int(time.time())
+    filename = f"styled_text_{timestamp}.png"
+    filepath = os.path.join(STORAGE_DIR, filename)
+
+    # Create and save the image
+    await create_stylish_text(update.message.text, filepath)
+    save_file_metadata(filename)
+
+    # Send the image
+    with open(filepath, 'rb') as photo:
+        await update.message.reply_photo(photo)
+
+async def main():
+    # Get bot token from environment
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token:
+        print("Please set BOT_TOKEN environment variable!")
+        return
+
+    # Create application and register handlers
+    application = Application.builder().token(bot_token).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Start cleanup task
+    asyncio.create_task(cleanup_old_files())
+
+    # Run the bot
+    await application.run_polling()
+
+if __name__ == "__main__":
+    load_dotenv()
+    asyncio.run(main())
